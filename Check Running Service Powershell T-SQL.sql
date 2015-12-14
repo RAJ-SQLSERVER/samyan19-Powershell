@@ -6,7 +6,7 @@ set @value=(select value from sys.configurations where name='xp_cmdshell');
 
 if @value=1
 begin
-	exec xp_cmdshell 'powershell.exe -noprofile -command "get-service | where-object {$_.name -like ''MSDtsServer*''}"'
+	exec xp_cmdshell 'powershell.exe -noprofile -command "get-service | where-object {$_.name -like ''ReportServer*'' -and $_.status -eq ''Running'' }"'
 end
 else
 begin
@@ -14,7 +14,7 @@ begin
 	reconfigure;
 	exec sp_configure 'xp_cmdshell',1;
 	reconfigure;
-	exec xp_cmdshell 'powershell.exe -noprofile -command "get-service | where-object {$_.name -like ''MSDtsServer*''}"'
+	exec xp_cmdshell 'powershell.exe -noprofile -command "get-service | where-object {$_.name -like ''ReportServer*'' -and $_.status -eq ''Running'' }"'
 	exec sp_configure 'xp_cmdshell',0;
 	reconfigure;
 end
