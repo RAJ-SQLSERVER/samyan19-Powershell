@@ -1,0 +1,201 @@
+
+
+[System.Reflection.Assembly]::LoadWithPartialName('Microsoft.SqlServer.SMO') | ForEach-Object {
+	$SmoMajorVersion = $_.GetName().Version.Major;
+	[System.Reflection.Assembly]::LoadWithPartialName('Microsoft.SqlServer.SQLEnum') | Out-Null;
+	if ($SmoMajorVersion -ge 10) {
+		[System.Reflection.Assembly]::LoadWithPartialName('Microsoft.SqlServer.SMOExtended') | Out-Null;
+		[System.Reflection.Assembly]::LoadWithPartialName('Microsoft.SqlServer.SQLWMIManagement') | Out-Null;
+	}
+}
+
+function Get-SqlAgentJobs {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory=$true)] 
+		[Microsoft.SqlServer.Management.Smo.Server]
+		$Server,
+		[Parameter(Mandatory=$true)] 
+		[Microsoft.SqlServer.Management.Smo.Server]
+		$InventoryDB
+	)
+	process {
+		try {
+			foreach ($Job in $Server.JobServer.Jobs )
+			{
+				IF ($Job.IsEnabled -eq "True"){
+					$DateCreated = $Job.DateCreated.ToString("yyyy-MM-ddTHH:MM:ss")
+					$DateModified = $Job.DateLastModified.ToString("yyyy-MM-ddTHH:MM:ss")
+					$LastRunDate = $Job.LastRunDate.ToString("yyyy-MM-ddTHH:MM:ss")
+
+					$SQL = "EXEC Inventory.dbo.up_Inv_InsertSQLAgentJob '" + $Server.Name +"','" + $Job.Name + "', '" + $DateCreated + "', '" + $DateModified + "' , '" + $LastRunDate + "','" + $Job.LastRunOutcome + "';"
+					Write-Output $SQL
+					#$output = ($InventoryDB.Databases['Inventory']).ExecuteWithResults( $SQL )
+				}
+			}
+		}
+		catch {
+				Throw
+		}
+	}
+}
+
+function Get-SqlCrashDumps {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory=$true)] [string]$Server,
+		[Parameter(Mandatory=$true)] [Microsoft.SqlServer.Management.Smo.Server]$InventoryDB
+	)
+	process {
+		try {
+			$SQLServer = new-object ('Microsoft.SqlServer.Management.Smo.Server')$Server
+			$PhysServer = $Server.split('\')[0];
+			$SQL=" declare @dir varchar(1000);
+				SET @dir = NULL;
+				exec master.dbo.xp_instance_regread N'hkey_local_machine',N'software\microsoft\mssqlserver\CPE',N'ErrorDumpDir', @dir output, 'no_output';
+				select @dir as path ;";
+			$dsCrashDump = ($SQLServer.Databases['master']).ExecuteWithResults( $SQL );
+			$dtCrashDump = $dsCrashDump.tables[0]
+	#Write-Output $dtCrashDump
+			foreach ($crash in $dtCrashDump) {
+				$CrashDumpPath = $crash.path
+	
+				$DumpPath=$CrashDumpPath.replace(':','$')
+				$dumps = get-Childitem "\\$PhysServer\$DumpPath" -recurse | where-object {$_.Extension -match "mdmp"} | select directory, name, CreationTime
+				if ($dumps) {
+					foreach ($dump in $dumps) {
+						$path = $dump.directory
+						$name = $dump.name
+						$Createdate = $dump.CreationTime.ToString("yyyy-MM-ddTHH:MM:ss")
+						$SQL = "INSERT into dbo.SQLDumpFile (SQLInstanceName,DumpPath,Name,CreateDate) SELECT '" + $SQLServer.Name + "','" + $path +"', '" + $name +"','"+ $Createdate +"'	WHERE NOT EXISTS (SELECT * FROM dbo.SQLDumpFile  WHERE SQLInstanceName='"+ $SQLServer.Name + "' and CreateDate='"+$Createdate+ "')"
+						Write-Output $SQL
+						#$output = ($InventoryDB.Databases['Inventory']).ExecuteWithResults( $SQL );
+					}
+				}
+				#else {write-Output "No dump files  found"}
+			}
+		}
+		catch {
+				Throw
+		}
+	}
+}
+function Get-SqlConfigAndDBBackups {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory=$true)] [string]$Server,
+		[Parameter(Mandatory=$true)] [Microsoft.SqlServer.Management.Smo.Server]$InventoryDB
+	)
+	process {
+		try {
+
+				$SQLServer = [Microsoft.SqlServer.Management.Smo.Server]$Server;
+				if (($SQLServer.AvailabilityGroups.PrimaryReplicaServerName -eq $Server) -or ($SQLServer.AvailabilityGroups.PrimaryReplicaServerName -eq $null)) {
+					$IsSecondary = 0
+				}
+	
+				else {
+					$IsSecondary = 1
+				}
+				$SQL = '';
+				# get database information
+				foreach($Database in $SQLServer.Databases) {	
+					if($Database.IsAccessible) {
+						$SQL = "EXEC dbo.up_Inv_InsertSQLServerDatabase '" + $SQLServer.Name +"','" + $Database.Name 	+ "', '" + $Database.LogFiles[0].FileName + "', '" + $Database.LogFiles[0].Name 	+ "', " + $Database.LogFiles[0].Size 	+ ", '" + $Database.LogFiles[0].Growth + $Database.LogFiles[0].GrowthType 	+ "', " + $Database.LogFiles[0].MaxSize + ", '"  + $Database.FileGroups[0].Files[0].FileName 	+ "', '" + $Database.FileGroups[0].Files[0].Name + "', " + $Database.FileGroups[0].Files[0].Size 	+ ", '" + $Database.FileGroups[0].Files[0].Growth + $Database.FileGroups[0].Files[0].GrowthType + "', " + $Database.FileGroups[0].Files[0].MaxSize + ", " +  ($Database.ExecuteWithResults("DBCC LOGINFO").Tables[0] | Measure-Object).Count  + ", '" + $Database.PageVerify + "', '" + $Database.AutoClose + "', '" + $Database.AutoShrink + "';`n" ;
+						Write-Output $SQL;
+						#$output = ($InventoryDB.Databases['Inventory']).ExecuteWithResults( $SQL );
+						if ($Database.IsUpdatable) {
+							$DateFullBackup = $Database.LastBackupDate.ToString("yyyy-MM-ddTHH:MM:ss");
+							$DateDiffBackup = $Database.LastDifferentialBackupDate.ToString("yyyy-MM-ddTHH:MM:ss");
+							$DateTLogBackup = $Database.LastLogBackupDate.ToString("yyyy-MM-ddTHH:MM:ss");
+							$SQL = "EXEC dbo.up_Inv_InsertSQLServerDatabasesBackups '" + $SQLServer.Name + "', '" + $Database.Name + "', '" + $Database.RecoveryModel + "', '" + $DateFullBackup + "', '" + $DateDiffBackup + "', '" + $DateTLogBackup + "', " + $IsSecondary.ToString() + "; `n";
+							Write-Output $SQL;
+							#$output = ($InventoryDB.Databases['Inventory']).ExecuteWithResults( $SQL );
+						}
+						$ExtProp = $Database.ExtendedProperties;
+						foreach ($Ep in $ExtProp){
+							$SQL = "EXEC[dbo].[up_Inv_InsertSQLServerDatabaseExtendedProperty] '" + $SQLServer.Name +"','" + $Database.Name 	+ "', '" + $Ep.Name + "', '" + $Ep.Value 	+ "' ;`n" ;
+							#$output = ($InventoryDB.Databases['Inventory']).ExecuteWithResults( $SQL );
+							write-output $SQL;
+						}
+					}
+				}
+				# get server information
+				foreach ($Config in $SQLServer.Configuration.Properties )
+				{
+					$SQL = "EXEC dbo.up_Inv_InsertSQLServerConfiguration '" + $SQLServer.Name +"','" + $Config.DisplayName + "'," + $Config.ConfigValue + "," + $Config.RunValue + ";"
+					Write-Output $SQL;
+					#$output = ($InventoryDB.Databases['Inventory']).ExecuteWithResults( $SQL );
+					
+				}
+			}
+			catch {
+				Throw
+		}
+	}
+}
+
+
+function Get-SqlAvailabilityGroups {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory=$true)] [string]$Server,
+		[Parameter(Mandatory=$true)] [Microsoft.SqlServer.Management.Smo.Server]$InventoryDB
+	)
+	process {
+		try {
+
+				$SQLServer = [Microsoft.SqlServer.Management.Smo.Server]$Server;
+				if ($SQLServer.AvailabilityGroups.PrimaryReplicaServerName -eq $Server){
+					$IsSecondary = 0
+				}
+				else{
+					$IsSecondary = 1
+				}
+				#$SQL = 'select @@SERVERNAME SQLInstanceName, ag.name, ag.failure_condition_level, ag.health_check_timeout, ag.automated_backup_preference_desc,ags.primary_replica, ags.primary_recovery_health_desc, ags.secondary_recovery_health_desc from master.sys.availability_groups ag	inner join master.sys.dm_hadr_availability_group_states as ags	on ag.group_id = ags.group_id';
+				$SQL = 'if (CAST(SERVERPROPERTY(''ProductVersion'') AS VARCHAR(50))  like ''11.%'') 	select @@SERVERNAME SQLInstanceName, ag.name, 	ag.failure_condition_level, ag.health_check_timeout, 	ag.automated_backup_preference_desc,ags.primary_replica, 	ags.primary_recovery_health_desc, ags.secondary_recovery_health_desc 	from master.sys.availability_groups ag		inner join master.sys.dm_hadr_availability_group_states 	as ags	on ag.group_id = ags.group_id; ';
+				$dsAvailabilityGroups = ($SQLServer.Databases['master']).ExecuteWithResults( $SQL );
+				$dtAvailabilityGroups = $dsAvailabilityGroups.tables[0]
+				
+				foreach ($AvailabilityGroup in $dtAvailabilityGroups)
+				{
+					if ($AvailabilityGroup.SQLInstanceName -ne $null)
+					{
+					$SQLInstanceName = $AvailabilityGroup.SQLInstanceName;
+					$AGName = $AvailabilityGroup.Name;
+					$FailureConditionLevel = $AvailabilityGroup.failure_condition_level;
+					$HealthCheckTimeout = $AvailabilityGroup.health_check_timeout;
+					$BackupPreference = $AvailabilityGroup.automated_backup_preference_desc;
+					$PrimaryReplica = $AvailabilityGroup.primary_replica;
+					$PrimaryRecoveryHealth = $AvailabilityGroup.primary_recovery_health_desc;
+					$SecondaryRecoveryHealth = $AvailabilityGroup.secondary_recovery_health_desc
+					
+					$SQL = "EXEC [dbo].[up_Inv_InsertSQLAvailabilityGroups] '" + $SQLInstanceName + "','" + $AGName + "'," + $FailureConditionLevel + "," + $HealthCheckTimeout + ",'" + $BackupPreference + "','" + $PrimaryReplica + "','" + $PrimaryRecoveryHealth + "','" + $SecondaryRecoveryHealth + "'";
+					Write-Output $SQL;
+					#$output = ($InventoryDB.Databases['Inventory']).ExecuteWithResults( $SQL );	
+					}
+				}
+				
+				
+				
+			}
+			catch {
+				Throw
+		}
+	}
+}
+
+$Servers = "K1STYSQLV04\ISQL01", "K1STYSQLV05\ISQL01"
+#"K1STYSQLV01\ISQL01", "K1STYSQLV02\ISQL01", "K1STYSQLV03\ISQL01", 
+
+$InventoryDB = [Microsoft.SqlServer.Management.Smo.Server]'RCSTVMAN07'
+
+
+foreach ($Server in $Servers)
+{
+	$ServerSQL = [Microsoft.SqlServer.Management.Smo.Server]$Server
+	Get-SqlAgentJobs $ServerSQL $InventoryDB;
+	Get-SqlCrashDumps $Server $InventoryDB;
+	Get-SqlConfigAndDBBackups $Server $InventoryDB;
+	Get-SqlAvailabilityGroups $Server $InventoryDB;
+}
