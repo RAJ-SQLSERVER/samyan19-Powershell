@@ -83,3 +83,6 @@ ForEach ($user in $users)
 }
 
 $PermScript
+
+#Example run
+#C:\temp\UsersAndPerms.ps1 K1STYSQLV03\ISQL01 DA_BRC_2015_04_DEV12 > c:\temp\DA_BRC_2015_04_DEV12_perms.txt
